@@ -2,142 +2,149 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import pickle
-from sklearn.metrics import mean_squared_error, r2_score
+import tensorflow as tf
 from tensorflow.keras.models import load_model
-from statsmodels.tsa.arima.model import ARIMA
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 import matplotlib.pyplot as plt
 import seaborn as sns
-from tensorflow.keras.losses import MeanSquaredError
 
-# Import utility functions
-from utils.data_loader import load_data
-
-# Load the cleaned and processed dataset
-new_data = load_data()
-
-# Load trained models
+# Load models
 @st.cache_resource
 def load_models():
-    with open('/workspaces/ml_retail/models/linear_regression_model.pkl', 'rb') as f:
-        lr_model = pickle.load(f)
-    with open('/workspaces/ml_retail/models/xgboost_model.pkl', 'rb') as f:
-        xgb_model = pickle.load(f)
-    custom_objects = {'mse': MeanSquaredError()}
-    lstm_model = load_model('/workspaces/ml_retail/models/lstm_model.h5', custom_objects=custom_objects)
-    with open('/workspaces/ml_retail/models/arima_model.pkl', 'rb') as f:
-        arima_model = pickle.load(f)
-    return lr_model, xgb_model, lstm_model, arima_model
+    models = {
+        "Linear Regression": pickle.load(open("/workspaces/ml_retail/models/linear_regression_model.pkl", "rb")),
+        "XGBoost": pickle.load(open("/workspaces/ml_retail/models/xgboost_model.pkl", "rb")),
+        "ARIMA": pickle.load(open("/workspaces/ml_retail/models/arima_model.pkl", "rb")),
+        "LSTM": load_model("/workspaces/ml_retail/models/lstm_model.h5", compile=False)
+    }
+    return models
 
-lr_model, xgb_model, lstm_model, arima_model = load_models()
+# Load the processed dataset
+@st.cache_data
+def load_data():
+    data = pd.read_csv("/workspaces/ml_retail/data/pp_new_data.csv")  # Replace with your processed dataset path
+    return data
 
-# Title and layout
-st.title("Retail Sales Dashboard")
+models = load_models()
+data = load_data()
+
+# Custom CSS for styling
 st.markdown("""
-This dashboard provides **data analytics** from trained models and **business intelligence** from open-source AI models.
+<style>
+    .stButton>button {
+        background-color: #FF4B4B;
+        color: white;
+        font-weight: bold;
+    }
+    .stSlider>div>div>div>div {
+        background-color: #FF4B4B;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Streamlit UI
+st.title("📊 Retail Sales Prediction Dashboard")
+st.markdown("""
+Welcome to the Retail Sales Prediction Dashboard!  
+This app allows you to predict sales based on various input features.  
+Adjust the sliders on the left to see how the predictions change.
 """)
 
-# Define region and category columns and mappings
-region_columns = ['Region_North', 'Region_South', 'Region_West']
-region_map = {
-    'Region_North': 'North',
-    'Region_South': 'South',
-    'Region_West': 'West'
-}
+# Model selection
+model_choice = st.sidebar.selectbox("Select Model", list(models.keys()))
 
-category_columns = [
-    'Category of Goods_Electric Appliances',
-    'Category of Goods_Fast Food',
-    'Category of Goods_Furniture',
-    'Category of Goods_Household Items',
-    'Category of Goods_Sessional Fruits & Vegetables'
-]
-category_map = {
-    'Category of Goods_Electric Appliances': 'Electric Appliances',
-    'Category of Goods_Fast Food': 'Fast Food',
-    'Category of Goods_Furniture': 'Furniture',
-    'Category of Goods_Household Items': 'Household Items',
-    'Category of Goods_Sessional Fruits & Vegetables': 'Sessional Fruits & Vegetables'
-}
+# Sidebar for input features
+st.sidebar.header("User Input Features")
+st.sidebar.subheader("Adjust the sliders below:")
+quantity = st.sidebar.slider("Quantity", min_value=1, max_value=100, value=10)
+discount = st.sidebar.slider("Discount", min_value=0.0, max_value=1.0, value=0.1, step=0.01)
+fulfillment_time = st.sidebar.slider("Fulfillment Time (days)", min_value=1, max_value=30, value=5)
 
-# Sidebar for user inputs
-st.sidebar.header("User Inputs")
-selected_model = st.sidebar.selectbox(
-    "Select Model",
-    ["Linear Regression", "XGBoost", "LSTM", "ARIMA"]
-)
+# Additional inputs for ARIMA and LSTM
+if model_choice == "ARIMA":
+    months_to_forecast = st.sidebar.slider("Months to Forecast", min_value=1, max_value=12, value=1)
+elif model_choice == "LSTM":
+    timesteps = 3  # As per your LSTM training setup
+    st.sidebar.write(f"LSTM requires {timesteps} previous time steps for prediction.")
 
-# Add feature inputs
-discount = st.sidebar.slider("Discount (%)", 0, 100, 10)
-region = st.sidebar.selectbox("Region", list(region_map.values()))
-category = st.sidebar.selectbox("Category of Goods", list(category_map.values()))
-quantity = st.sidebar.slider("Quantity", 1, 100, 10)
+# Function to find the closest matching row in the dataset
+def find_closest_row(data, quantity, discount, fulfillment_time):
+    # Calculate the Euclidean distance between the input and each row in the dataset
+    data['distance'] = np.sqrt(
+        (data['Quantity'] - quantity) ** 2 +
+        (data['Discount'] - discount) ** 2 +
+        (data['Fulfillment Time'] - fulfillment_time) ** 2
+    )
+    # Return the row with the smallest distance
+    return data.loc[data['distance'].idxmin()]
 
-# Find the binary columns for the selected region and category
-selected_region_column = [col for col, name in region_map.items() if name == region][0]
-selected_category_column = [col for col, name in category_map.items() if name == category][0]
+# Preprocessing function for Linear Regression, XGBoost
+def preprocess_input(row):
+    # Extract the required features
+    input_features = row[['Quantity', 'Discount', 'Fulfillment Time', 'Customer Age', 'CLV', 'Discount Impact', 'Product Popularity', 'Year', 'Postal Code']].values.reshape(1, -1)
+    # Scale the input features (as done during training)
+    scaler = StandardScaler()
+    scaler.fit(data[['Quantity', 'Discount', 'Fulfillment Time', 'Customer Age', 'CLV', 'Discount Impact', 'Product Popularity', 'Year', 'Postal Code']])
+    return scaler.transform(input_features)
 
-# Create the features array dynamically
-features = np.array([[discount, new_data[selected_region_column].iloc[0], new_data[selected_category_column].iloc[0], quantity, 0, 0, 0, 0, 0]])
+# Preprocessing function for LSTM
+def preprocess_lstm_input(quantity, discount, fulfillment_time, timesteps=3):
+    input_features = np.array([[quantity, discount, fulfillment_time]])
+    scaler = MinMaxScaler()
+    scaler.fit([[1, 0.0, 1]])  # Dummy fit to match training scaler
+    scaled_input = scaler.transform(input_features)
+    return scaled_input.reshape((1, timesteps, 1))
 
-# Debug: Print the features array
-st.write("Features Array:", features)
+# Model Prediction
+try:
+    if model_choice in ["Linear Regression", "XGBoost"]:
+        # Find the closest matching row in the dataset
+        closest_row = find_closest_row(data, quantity, discount, fulfillment_time)
+        # Preprocess the input features
+        input_features = preprocess_input(closest_row)
+        # Make prediction
+        prediction = models[model_choice].predict(input_features)[0]
+    elif model_choice == "ARIMA":
+        prediction = models[model_choice].forecast(steps=months_to_forecast)[-1]  # Last value in forecast
+    elif model_choice == "LSTM":
+        input_lstm = preprocess_lstm_input(quantity, discount, fulfillment_time)
+        prediction_scaled = models[model_choice].predict(input_lstm)[0][0]
+        scaler = MinMaxScaler()
+        scaler.fit([[1]])  # Dummy fit to match training scaler
+        prediction = scaler.inverse_transform([[prediction_scaled]])[0][0]
 
-# Update predictions based on selected model
-if selected_model == "Linear Regression":
-    prediction = lr_model.predict(features)[0]
-    st.write(f"Predicted Sales (Linear Regression): {prediction:.2f}")
+    # Display prediction
+    st.subheader("Predicted Sales")
+    st.metric("Predicted Sales", f"${prediction:.2f}")
 
-elif selected_model == "XGBoost":
-    prediction = xgb_model.predict(features)[0]
-    st.write(f"Predicted Sales (XGBoost): {prediction:.2f}")
+    # Visualization
+    st.subheader("Sales Prediction Visualization")
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.bar(["Predicted Sales"], [prediction], color="#FF4B4B")  # Use a custom color
+    ax.set_ylabel("Sales ($)")
+    ax.set_title("Predicted Sales Value", fontsize=14)
+    st.pyplot(fig)
 
-elif selected_model == "LSTM":
-    # Preprocess input data for LSTM
-    lstm_input = features.reshape((features.shape[0], 1, features.shape[1]))  # Reshape to (batch_size, timesteps, features)
-    try:
-        lstm_prediction = lstm_model.predict(lstm_input)[0][0]
-        st.write(f"Predicted Sales (LSTM): {lstm_prediction:.2f}")
-    except Exception as e:
-        st.error(f"Error in LSTM prediction: {e}")
+except Exception as e:
+    st.error(f"An error occurred: {e}")
 
-elif selected_model == "ARIMA":
-    forecast = arima_model.forecast(steps=1).iloc[0]
-    st.write(f"Predicted Sales (ARIMA): {forecast:.2f}")
+# Debugging: Print Linear Regression coefficients
+if model_choice == "Linear Regression":
+    st.subheader("Linear Regression Coefficients")
+    st.write(models["Linear Regression"].coef_)
 
-# Filter the dataset based on user inputs
-filtered_data = new_data[
-    (new_data['Discount'] == discount) &
-    (new_data[selected_region_column] == 1) &
-    (new_data[selected_category_column] == 1)
-]
+# Debugging: Plot correlation heatmap
+st.subheader("Feature Correlation Heatmap")
 
-# Check if filtered_data is empty
-if filtered_data.empty:
-    st.warning("No data matches the selected filters. Using the full dataset for visualization.")
-    filtered_data = new_data  # Fallback to the full dataset
+# Select only numeric columns for correlation heatmap
+numeric_data = data.select_dtypes(include=['number'])
+corr = numeric_data.corr()
 
-# Visualizations
-st.write("### Sales Trends Over Time")
-plt.figure(figsize=(10, 6))
-sns.lineplot(x='Sales Date', y='Sales', data=filtered_data)
-plt.title("Sales Over Time")
-st.pyplot(plt)
-
-# Impact of Discount on Profit
-st.write("### Impact of Discount on Profit")
-plt.figure(figsize=(10, 6))
-sns.lineplot(x='Discount', y='Profit', data=filtered_data)
-plt.title("Discount vs Profit")
-st.pyplot(plt)
-
-# Key Metrics
-st.write("### Key Metrics")
-total_sales = filtered_data['Sales'].sum()
-average_profit = filtered_data['Profit'].mean()
-
-st.metric("Total Sales", f"${total_sales:,.2f}")
-st.metric("Average Profit", f"${average_profit:,.2f}")
+# Plot the heatmap
+fig, ax = plt.subplots(figsize=(10, 8))
+sns.heatmap(corr, annot=True, cmap="coolwarm", ax=ax)
+st.pyplot(fig)
 
 # Footer
 st.markdown("---")
-st.markdown("Built with ❤️ using Streamlit")
+st.markdown("© AK Retail Sales Prediction Dashboard. Built with ❤️ using Streamlit.")
